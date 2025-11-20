@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dott. Antonio Di Stasi | Prenotazioni Visite Medico Sportive</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Stile personalizzato per il focus e l'estetica */
+        :focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5); /* blu-500 semi-trasparente */
+        }
+        /* Stile per i pulsanti Data */
+        .date-button {
+            transition: all 0.15s ease-in-out;
+        }
+        .date-button:hover:not(:disabled) {
+            background-color: #2563EB; /* blue-600 */
+            color: white;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        /* Stile per slot occupati */
+        .slot-button:disabled {
+            background-color: #FEE2E2; /* red-100 */
+            color: #B91C1C; /* red-700 */
+            cursor: not-allowed;
+            opacity: 0.7;
+            text-decoration: line-through;
+        }
+        /* Stile per slot disponibile */
+        .slot-available {
+            background-color: #D1FAE5; /* green-100 */
+            color: #065F46; /* green-700 */
+        }
+        /* Stile per slot selezionato */
+        .slot-selected {
+            background-color: #10B981; /* green-500 */
+            color: white;
+            box-shadow: 0 2px 4px rgba(16, 185, 129, 0.5);
+            border-color: #059669;
+        }
+        /* Stile per messaggi di stato */
+        .status-message {
+            border-left-width: 4px;
+            padding: 1rem;
+            margin-top: 1rem;
+            border-radius: 0.375rem;
+            font-weight: 500;
+        }
+    </style>
+    <!-- Firebase Libraries -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, runTransaction, where, getDocs, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Log Level per debug
+        setLogLevel('debug');
+
+        // --- Configurazione Firebase (Gestione per Esecuzione Locale) ---
+
+        // Variabili Globali del Canvas
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
+        // Configurazione Firebase: Fallback (fittizia) per l'esecuzione in locale (risolve "projectId" error)
+        const defaultFirebaseConfig = {
+            apiKey: "AIzaSyC0d3F1tt1z10p3rL0c4L3", // Chiave FITTIZIA per il test locale
+            authDomain: "test-booking-app.firebaseapp.com",
+            projectId: "test-booking-app", // ID progetto FITTIZIO
+            storageBucket: "test-booking-app.appspot.com",
+            messagingSenderId: "123456789012",
+            appId: "1:123456789012:web:a1b2c3d4e5f6g7h8i9j0",
+        };
+        
+        // Determina la configurazione: usa quella esterna se disponibile, altrimenti usa il default
+        let config = defaultFirebaseConfig;
+        if (typeof __firebase_config !== 'undefined' && __firebase_config.length > 2) {
+            try {
+                const parsedConfig = JSON.parse(__firebase_config);
+                if (parsedConfig.projectId) {
+                    config = parsedConfig;
+                }
+            } catch (e) {
+                console.error("Errore nel parsing di __firebase_config, utilizzando il default.", e);
+            }
+        }
+
+        const firebaseConfig = config;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Inizializzazione Firebase
+        let app, db, auth;
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+        } catch (e) {
+            console.error("Errore durante l'inizializzazione di Firebase:", e);
+        }
+
+        let currentUserId = null;
+        let gymId = null; // Variabile globale per l'ID della palestra (gymId)
+        let isAuthReady = false;
+
+        // Aggiorna l'ID app per debug all'inizio
+        document.addEventListener('DOMContentLoaded', () => {
+             document.getElementById('app-id-display').textContent = appId;
+        });
+        
+
+        // --- Funzioni di Utility ---
+
+        // Funzione per ottenere l'ID della palestra dall'URL o tramite il pannello amministrativo
+        function getGymId() {
+            const urlParams = new URLSearchParams(window.location.search);
+            return urlParams.get('gym');
+        }
+
+        // Determina il percorso base del documento di disponibilità
+        function getAvailabilityDocRef(date) {
+            return doc(db, "artifacts", appId, "public", "data", "availability", gymId, "dates", date);
+        }
+
+        // Determina il percorso della collezione di prenotazioni
+        function getBookingsCollectionRef(gymId) {
+            return collection(db, "artifacts", appId, "public", "data", "bookings", gymId, "reservations");
+        }
+
+        // Formatta una data e ora (Timestamp) per la visualizzazione
+        function formatDateTime(timestamp) {
+            const date = new Date(timestamp);
+            return date.toLocaleString('it-IT', {
+                year: 'numeric', month: 'numeric', day: 'numeric',
+                hour: '2-digit', minute: '2-digit'
+            });
+        }
+
+        // Genera slot di 10 minuti
+        function generateSlots(startTime, endTime) {
+            const slots = [];
+            let current = new Date(`2000/01/01 ${startTime}`);
+            const end = new Date(`2000/01/01 ${endTime}`);
+
+            while (current < end) {
+                slots.push(current.toTimeString().substring(0, 5));
+                current.setMinutes(current.getMinutes() + 10);
+            }
+            return slots;
+        }
+
+        // --- Gestione Stato Locale ---
+        let availableDates = {}; // { 'YYYY-MM-DD': { startTime: 'HH:MM', endTime: 'HH:MM' } }
+        let currentBookings = {}; // { 'YYYY-MM-DD HH:MM': { name: '...', ... } }
+        let selectedDate = null;
+        let selectedSlot = null;
+
+        // --- UI Elements ---
+        const appContainer = document.getElementById('app-container');
+        const adminAccessBlock = document.getElementById('admin-access-block');
+        const adminGymIdInput = document.getElementById('admin-gym-id');
+        const adminUnlockButton = document.getElementById('admin-unlock-button');
+        const appHeader = document.getElementById('app-header');
+
+        const step1Container = document.getElementById('step-1-container');
+        const dateButtonsContainer = document.getElementById('date-buttons');
+        const step2Container = document.getElementById('step-2-container');
+        const slotButtonsContainer = document.getElementById('slot-buttons');
+        const step3Container = document.getElementById('step-3-container');
+        const bookingForm = document.getElementById('booking-form');
+        const formStatus = document.getElementById('form-status');
+        const adminPanel = document.getElementById('admin-panel');
+        const bookingsTableBody = document.getElementById('bookings-table-body');
+
+        // --- Funzioni di Rendering e Logica ---
+
+        function renderAdminAccess() {
+            if (!gymId) {
+                appContainer.classList.add('hidden');
+                adminAccessBlock.classList.remove('hidden');
+            } else {
+                appContainer.classList.remove('hidden');
+                adminAccessBlock.classList.add('hidden');
+                
+                // Aggiorna l'header principale e il titolo amministrativo qui
+                appHeader.textContent = `Dott. Antonio Di Stasi presso ${gymId}`;
+                document.getElementById('admin-gym-display').textContent = gymId;
+                
+                // Avvia l'app dopo l'ottenimento dell'ID palestra
+                if (isAuthReady) {
+                    setupListeners();
+                }
+            }
+        }
+
+        function renderDates() {
+            dateButtonsContainer.innerHTML = '';
+            
+            const sortedDates = Object.keys(availableDates).sort();
+            
+            if (sortedDates.length === 0) {
+                dateButtonsContainer.innerHTML = '<p class="text-gray-500">Nessuna disponibilità caricata per questo centro.</p>';
+                adminPanel.classList.remove('hidden'); // Forza la visualizzazione del pannello amministrativo
+            } else {
+                let foundFutureDate = false;
+                const today = new Date();
+                today.setHours(0, 0, 0, 0); // Reset orario a mezzanotte
+
+                sortedDates.forEach(dateStr => {
+                    const dateObj = new Date(dateStr);
+                    if (dateObj >= today) {
+                        foundFutureDate = true;
+                        const dateLocale = dateObj.toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' });
+                        const button = document.createElement('button');
+                        button.textContent = dateLocale;
+                        button.classList.add('date-button', 'bg-white', 'text-blue-600', 'border', 'border-blue-400', 'rounded-lg', 'py-2', 'px-4', 'font-semibold', 'shadow-sm', 'mr-2', 'mb-2');
+                        
+                        if (dateStr === selectedDate) {
+                            button.classList.add('bg-blue-600', 'text-white', 'hover:bg-blue-700');
+                        } else {
+                            button.classList.add('hover:bg-blue-50');
+                        }
+
+                        button.onclick = () => selectDate(dateStr);
+                        dateButtonsContainer.appendChild(button);
+                    }
+                });
+
+                if (!foundFutureDate) {
+                    dateButtonsContainer.innerHTML = '<p class="text-gray-500">Nessuna data futura disponibile. Caricare la disponibilità.</p>';
+                }
+            }
+
+            step2Container.classList.add('hidden');
+            step3Container.classList.add('hidden');
+        }
+
+        function selectDate(date) {
+            selectedDate = date;
+            selectedSlot = null; // Resetta slot
+            
+            // Ricarica i pulsanti data per evidenziare la selezione
+            renderDates(); 
+            renderSlots();
+        }
+
+        function renderSlots() {
+            slotButtonsContainer.innerHTML = '';
+            
+            if (!selectedDate || !availableDates[selectedDate]) {
+                step2Container.classList.add('hidden');
+                return;
+            }
+
+            step2Container.classList.remove('hidden');
+            const { startTime, endTime } = availableDates[selectedDate];
+            const allSlots = generateSlots(startTime, endTime);
+            
+            let slotCount = 0;
+
+            allSlots.forEach(slot => {
+                const bookingKey = `${selectedDate} ${slot}`;
+                const isBooked = !!currentBookings[bookingKey];
+
+                const button = document.createElement('button');
+                button.textContent = slot;
+                button.classList.add('slot-button', 'rounded-lg', 'py-2', 'px-3', 'font-medium', 'text-sm', 'mr-2', 'mb-2', 'border', 'shadow-sm');
+                
+                if (isBooked) {
+                    button.disabled = true;
+                    // Stile gestito da CSS: red-100/red-700
+                } else {
+                    slotCount++;
+                    button.classList.add('slot-available', 'border-green-400');
+                    button.onclick = () => selectSlot(slot);
+                    
+                    if (slot === selectedSlot) {
+                        button.classList.add('slot-selected');
+                        button.classList.remove('slot-available');
+                    }
+                }
+
+                slotButtonsContainer.appendChild(button);
+            });
+
+            // Mostra il numero di slot liberi (informazione aggiuntiva)
+            const countInfo = document.getElementById('slot-count-info');
+            if (countInfo) {
+                countInfo.textContent = `Slot totali liberi per questo giorno: ${slotCount}`;
+            }
+
+            // Forza il rendering del form
+            renderForm();
+        }
+
+        function selectSlot(slot) {
+            selectedSlot = slot;
+            renderSlots(); // Ricarica gli slot per evidenziare la selezione
+            renderForm();
+        }
+
+        function renderForm() {
+            step3Container.classList.add('hidden');
+            if (selectedSlot) {
+                step3Container.classList.remove('hidden');
+                const slotText = `${selectedDate} alle ${selectedSlot}`;
+                document.getElementById('selected-slot-display').textContent = slotText;
+            }
+        }
+
+        // --- Funzioni Database Firestore ---
+
+        function setupListeners() {
+            if (!db || !gymId || !isAuthReady) {
+                console.warn("DB, GymID o Auth non pronti per i listeners.");
+                return;
+            }
+            
+            // 1. Listener per la Disponibilità (Giorni)
+            const availabilityRef = collection(db, "artifacts", appId, "public", "data", "availability", gymId, "dates");
+            
+            onSnapshot(availabilityRef, (snapshot) => {
+                availableDates = {};
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    // Firebase salva la data come ID del documento, non è necessario .id
+                    availableDates[doc.id] = { 
+                        startTime: data.startTime, 
+                        endTime: data.endTime 
+                    };
+                });
+                renderDates();
+                
+                // Forza la visualizzazione del pannello amministrativo se ci sono prenotazioni
+                if (Object.keys(currentBookings).length > 0) {
+                    adminPanel.classList.remove('hidden');
+                }
+            }, (error) => {
+                console.error("Errore nel listener di Disponibilità:", error);
+                // Non mostrare l'errore al paziente, ma forzare lo stato amministrativo se non ci sono dati.
+                if (Object.keys(availableDates).length === 0) {
+                    adminPanel.classList.remove('hidden'); 
+                }
+            });
+
+
+            // 2. Listener per le Prenotazioni (Slots Occupati)
+            const bookingsQuery = query(getBookingsCollectionRef(gymId));
+
+            onSnapshot(bookingsQuery, (snapshot) => {
+                currentBookings = {};
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    const bookingKey = `${data.Data} ${data.Ora}`;
+                    currentBookings[bookingKey] = data;
+                });
+                renderSlots();
+                renderBookingsTable();
+            }, (error) => {
+                console.error("Errore nel listener di Prenotazioni:", error);
+            });
+        }
+
+        // --- Funzione Seeding (Caricamento Amministrativo) ---
+
+        document.getElementById('seeding-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const date = document.getElementById('seeding-date').value;
+            const startTime = document.getElementById('seeding-start-time').value;
+            const endTime = document.getElementById('seeding-end-time').value;
+            const seedingStatus = document.getElementById('seeding-status');
+
+            seedingStatus.textContent = 'Caricamento disponibilità...';
+            seedingStatus.classList.remove('bg-red-100', 'border-red-500', 'text-red-700');
+            seedingStatus.classList.add('bg-blue-100', 'border-blue-500', 'text-blue-700');
+            
+            if (!date || !startTime || !endTime || !gymId) {
+                 seedingStatus.textContent = 'Errore: Tutti i campi sono obbligatori.';
+                 seedingStatus.classList.remove('bg-blue-100', 'border-blue-500', 'text-blue-700');
+                 seedingStatus.classList.add('bg-red-100', 'border-red-500', 'text-red-700');
+                return;
+            }
+
+            try {
+                const docRef = getAvailabilityDocRef(date);
+                // Usa setDoc per sovrascrivere o creare il documento con la data come ID
+                await setDoc(docRef, {
+                    startTime: startTime,
+                    endTime: endTime,
+                    // Inserisci qui anche il gymId, se necessario, anche se è già nel percorso
+                });
+
+                seedingStatus.textContent = `Disponibilità caricata per il ${date}!`;
+                seedingStatus.classList.remove('bg-blue-100', 'border-blue-500', 'text-blue-700');
+                seedingStatus.classList.add('bg-green-100', 'border-green-500', 'text-green-700');
+
+            } catch (error) {
+                console.error("Errore nel caricamento disponibilità (Seeding):", error);
+                seedingStatus.textContent = `Errore di connessione: ${error.message}`;
+                seedingStatus.classList.remove('bg-blue-100', 'border-blue-500', 'text-blue-700');
+                seedingStatus.classList.add('bg-red-100', 'border-red-500', 'text-red-700');
+            }
+        });
+
+        // --- Funzione Prenotazione Paziente (Transaction) ---
+
+        bookingForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            if (!selectedDate || !selectedSlot) {
+                formStatus.textContent = 'Errore: Selezionare prima una data e un orario.';
+                formStatus.classList.remove('bg-green-100', 'border-green-500', 'text-green-700');
+                formStatus.classList.add('bg-red-100', 'border-red-500', 'text-red-700');
+                return;
+            }
+
+            const nome = document.getElementById('nome').value;
+            const cognome = document.getElementById('cognome').value;
+            const dataNascita = document.getElementById('dataNascita').value;
+            const cittaNascita = document.getElementById('cittaNascita').value;
+            const cittaResidenza = document.getElementById('cittaResidenza').value;
+            const indirizzoResidenza = document.getElementById('indirizzoResidenza').value;
+            const email = document.getElementById('email').value;
+            const telefono = document.getElementById('telefono').value;
+
+            // Simple validation
+            if (!nome || !cognome || !dataNascita || !email) {
+                formStatus.textContent = 'Errore: I campi Nome, Cognome, Data Nascita ed Email sono obbligatori.';
+                formStatus.classList.add('bg-red-100', 'border-red-500', 'text-red-700');
+                return;
+            }
+
+            const bookingDateTime = `${selectedDate} ${selectedSlot}`;
+            const token = crypto.randomUUID().substring(0, 8).toUpperCase(); // Genera un token corto
+            const bookingDocRef = doc(getBookingsCollectionRef(gymId), bookingDateTime);
+
+            formStatus.textContent = 'Elaborazione prenotazione...';
+            formStatus.classList.remove('bg-red-100', 'border-red-500', 'text-red-700');
+            formStatus.classList.add('bg-blue-100', 'border-blue-500', 'text-blue-700');
+
+            try {
+                // Esegue una transazione per garantire che lo slot non venga prenotato da due persone contemporaneamente
+                await runTransaction(db, async (transaction) => {
+                    const slotDoc = await transaction.get(bookingDocRef);
+
+                    if (slotDoc.exists()) {
+                        // Slot già prenotato, interrompe la transazione
+                        throw new Error("Slot già occupato. Selezionare un altro orario.");
+                    }
+
+                    // Se lo slot è libero, salva la prenotazione
+                    const newBooking = {
+                        Data: selectedDate,
+                        Ora: selectedSlot,
+                        Nome: nome,
+                        Cognome: cognome,
+                        DataNascita: dataNascita,
+                        CittaNascita: cittaNascita,
+                        CittaResidenza: cittaResidenza,
+                        IndirizzoResidenza: indirizzoResidenza,
+                        Email: email,
+                        Telefono: telefono,
+                        Timestamp: new Date().toISOString(),
+                        Token: token,
+                        GymId: gymId // Utile per query future
+                    };
+
+                    transaction.set(bookingDocRef, newBooking);
+                });
+
+                // Successo della prenotazione
+                formStatus.textContent = `Prenotazione confermata per il ${bookingDateTime}! Il tuo codice Token è: ${token}`;
+                formStatus.classList.remove('bg-blue-100', 'border-blue-500', 'text-blue-700');
+                formStatus.classList.add('bg-green-100', 'border-green-500', 'text-green-700');
+
+                // Resetta il form e la selezione
+                bookingForm.reset();
+                selectedDate = null;
+                selectedSlot = null;
+                renderDates(); // Aggiorna l'interfaccia
+                
+            } catch (e) {
+                console.error("Errore durante la prenotazione:", e);
+                const errorMessage = e.message.includes("Slot già occupato") ? e.message : "Errore nella transazione. Riprovare.";
+                
+                formStatus.textContent = errorMessage;
+                formStatus.classList.remove('bg-blue-100', 'border-blue-500', 'text-blue-700');
+                formStatus.classList.add('bg-red-100', 'border-red-500', 'text-red-700');
+            }
+        });
+
+        // --- Funzione Amministrativa (Riepilogo Prenotazioni) ---
+
+        function renderBookingsTable() {
+            bookingsTableBody.innerHTML = '';
+            
+            const bookingsArray = Object.values(currentBookings);
+            if (bookingsArray.length === 0) {
+                bookingsTableBody.innerHTML = '<tr><td colspan="10" class="text-center py-4 text-gray-500">Nessuna prenotazione attiva per questo centro.</td></tr>';
+                return;
+            }
+
+            // Ordina per data e ora
+            const sortedBookings = bookingsArray.sort((a, b) => {
+                const dateTimeA = `${a.Data} ${a.Ora}`;
+                const dateTimeB = `${b.Data} ${b.Ora}`;
+                return new Date(dateTimeA) - new Date(dateTimeB);
+            });
+
+            sortedBookings.forEach(booking => {
+                const tr = document.createElement('tr');
+                tr.classList.add('border-b', 'hover:bg-gray-50');
+
+                // Filtro per mostrare solo prenotazioni future (da mezzanotte di oggi)
+                const bookingDate = new Date(`${booking.Data}T${booking.Ora}:00`);
+                const today = new Date();
+                today.setHours(0, 0, 0, 0); // Reset orario a mezzanotte
+                
+                if (bookingDate < today) {
+                    return; // Salta le prenotazioni passate
+                }
+
+
+                tr.innerHTML = `
+                    <td class="py-2 px-4 whitespace-nowrap text-sm font-medium text-gray-900">${booking.Data}</td>
+                    <td class="py-2 px-4 whitespace-nowrap text-sm text-gray-700">${booking.Ora}</td>
+                    <td class="py-2 px-4 whitespace-nowrap text-sm text-gray-700">${booking.Nome} ${booking.Cognome}</td>
+                    <td class="py-2 px-4 whitespace-nowrap text-sm text-gray-700">${booking.Telefono || '-'}</td>
+                    <td class="py-2 px-4 whitespace-nowrap text-sm text-gray-700">${booking.DataNascita}</td>
+                    <td class="py-2 px-4 text-sm text-gray-700">${booking.CittaResidenza || '-'}</td>
+                    <td class="py-2 px-4 text-sm font-mono text-xs text-blue-600">${booking.Token}</td>
+                `;
+                bookingsTableBody.appendChild(tr);
+            });
+        }
+
+
+        // --- Gestione Iniziale e Autenticazione ---
+
+        // Listener per il pulsante di sblocco amministrativo
+        adminUnlockButton.addEventListener('click', () => {
+            const inputGymId = adminGymIdInput.value.trim().toUpperCase().replace(/\s+/g, '_');
+            if (inputGymId) {
+                // Forza l'impostazione dell'ID palestra
+                gymId = inputGymId;
+                renderAdminAccess();
+            } else {
+                // Non usiamo alert qui, ma mostriamo un messaggio
+                const adminAccessBlock = document.getElementById('admin-access-block');
+                const p = adminAccessBlock.querySelector('p:last-child');
+                p.textContent = "Errore: Inserire un codice palestra valido.";
+                p.classList.add('text-red-500');
+            }
+        });
+
+        // Funzione di autenticazione e setup iniziale
+        async function initializeAppAndAuth() {
+            if (!app || !db || !auth) {
+                 console.error("Firebase non inizializzato correttamente.");
+                 return;
+            }
+
+            // Tentativo di autenticazione
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Errore durante l'autenticazione Firebase:", error);
+            }
+            
+            // Listener per l'autenticazione
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    currentUserId = user.uid;
+                    isAuthReady = true;
+                    // Prova a leggere l'ID palestra dall'URL
+                    const urlGymId = getGymId();
+                    if (urlGymId) {
+                        gymId = urlGymId.toUpperCase().replace(/\s+/g, '_');
+                    }
+                    
+                    // Rende l'accesso amministrativo se necessario
+                    renderAdminAccess();
+                    
+                    // Se l'ID palestra è disponibile (URL o dopo lo sblocco), avvia i listener
+                    if (gymId) {
+                        setupListeners();
+                    }
+                } else {
+                    console.log("Utente disconnesso/anonimo.");
+                }
+            });
+        }
+        
+        // Avvia l'applicazione all'apertura
+        initializeAppAndAuth();
+
+    </script>
+</head>
+
+<body class="bg-gray-100 font-sans antialiased text-gray-800 p-4 sm:p-8">
+
+    <!-- Contenitore Principale -->
+    <div id="app-container" class="max-w-4xl mx-auto bg-white shadow-xl rounded-2xl p-6 sm:p-10 transition-opacity duration-500">
+
+        <!-- Header -->
+        <header class="mb-8 border-b pb-4">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-blue-700">Prenotazione Visite Medico Sportive</h1>
+            <p id="app-header" class="mt-1 text-lg text-gray-600">Dott. Antonio Di Stasi</p>
+            <p class="mt-1 text-xs text-gray-400">ID App: <span class="font-mono" id="app-id-display"></span></p>
+        </header>
+
+        <!-- Passi di Prenotazione -->
+        <div id="booking-steps">
+            
+            <!-- Passo 1: Selezione del Giorno -->
+            <section id="step-1-container" class="mb-8">
+                <h2 class="text-xl font-bold mb-4 text-blue-600">1. Seleziona il giorno della visita</h2>
+                <div id="date-buttons" class="flex flex-wrap">
+                    <p class="text-gray-500">Caricamento disponibilità...</p>
+                </div>
+            </section>
+
+            <!-- Passo 2: Selezione dello Slot Orario -->
+            <section id="step-2-container" class="mb-8 hidden">
+                <h2 class="text-xl font-bold mb-4 text-blue-600">2. Seleziona l'orario (Slot da 10 minuti)</h2>
+                <p id="slot-count-info" class="text-sm text-gray-500 mb-3"></p>
+                <div id="slot-buttons" class="flex flex-wrap">
+                    <!-- Slot generati qui -->
+                </div>
+            </section>
+
+            <!-- Passo 3: Form di Prenotazione -->
+            <section id="step-3-container" class="mb-8 border-t pt-6 hidden">
+                <h2 class="text-xl font-bold mb-4 text-blue-600">3. Completa la prenotazione per <span id="selected-slot-display" class="text-green-600"></span></h2>
+                
+                <form id="booking-form" class="space-y-4 p-6 bg-green-50 rounded-lg border border-green-200">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label for="nome" class="block text-sm font-medium text-gray-700">Nome *</label>
+                            <input type="text" id="nome" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                        </div>
+                        <div>
+                            <label for="cognome" class="block text-sm font-medium text-gray-700">Cognome *</label>
+                            <input type="text" id="cognome" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label for="dataNascita" class="block text-sm font-medium text-gray-700">Data di Nascita *</label>
+                            <input type="date" id="dataNascita" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                        </div>
+                        <div>
+                            <label for="telefono" class="block text-sm font-medium text-gray-700">Telefono</label>
+                            <input type="tel" id="telefono" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="email" class="block text-sm font-medium text-gray-700">Email *</label>
+                        <input type="email" id="email" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                    </div>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label for="cittaNascita" class="block text-sm font-medium text-gray-700">Città di Nascita</label>
+                            <input type="text" id="cittaNascita" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                        </div>
+                        <div>
+                            <label for="cittaResidenza" class="block text-sm font-medium text-gray-700">Città di Residenza</label>
+                            <input type="text" id="cittaResidenza" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                        </div>
+                        <div>
+                            <label for="indirizzoResidenza" class="block text-sm font-medium text-gray-700">Indirizzo di Residenza</label>
+                            <input type="text" id="indirizzoResidenza" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 focus:ring-green-500 focus:border-green-500">
+                        </div>
+                    </div>
+
+                    <button type="submit" class="w-full py-3 px-4 border border-transparent rounded-lg shadow-md text-base font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition duration-150 ease-in-out">
+                        CONFERMA PRENOTAZIONE
+                    </button>
+                </form>
+                
+                <div id="form-status" class="status-message bg-white"></div>
+            </section>
+        </div>
+
+        <!-- Pannello Amministrativo (Visibile solo al Dottore) -->
+        <section id="admin-panel" class="mt-10 border-t pt-6 hidden">
+            <h2 class="text-2xl font-bold text-yellow-700 mb-4">Modalità Amministrativa per <span class="font-mono text-yellow-900" id="admin-gym-display"></span></h2>
+            
+            <!-- 1. Carica Nuova Disponibilità (Seeding) -->
+            <div class="p-4 bg-yellow-50 rounded-lg border border-yellow-200 mb-6 shadow-md">
+                <h3 class="text-lg font-semibold text-yellow-800 mb-3">1. Carica Nuova Disponibilità (Seeding)</h3>
+                <form id="seeding-form" class="space-y-3">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div>
+                            <label for="seeding-date" class="block text-sm font-medium text-yellow-700">Data (YYYY-MM-DD)</label>
+                            <input type="date" id="seeding-date" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 focus:ring-yellow-500 focus:border-yellow-500">
+                        </div>
+                        <div>
+                            <label for="seeding-start-time" class="block text-sm font-medium text-yellow-700">Ora Inizio (HH:MM)</label>
+                            <input type="time" id="seeding-start-time" required value="09:00" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 focus:ring-yellow-500 focus:border-yellow-500">
+                        </div>
+                        <div>
+                            <label for="seeding-end-time" class="block text-sm font-medium text-yellow-700">Ora Fine (HH:MM)</label>
+                            <input type="time" id="seeding-end-time" required value="13:00" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 focus:ring-yellow-500 focus:border-yellow-500">
+                        </div>
+                    </div>
+                    <button type="submit" class="w-full py-2 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 transition duration-150 ease-in-out">
+                        Carica Disponibilità (Slot da 10 min)
+                    </button>
+                    <div id="seeding-status" class="status-message bg-yellow-100 border-yellow-500 text-yellow-700 text-sm">Pronto per il caricamento.</div>
+                </form>
+            </div>
+
+            <!-- 2. Riepilogo Prenotazioni Attive -->
+            <div class="p-4 bg-yellow-50 rounded-lg border border-yellow-200 shadow-md">
+                <h3 class="text-lg font-semibold text-yellow-800 mb-3">2. Riepilogo Prenotazioni Attive</h3>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead>
+                            <tr class="bg-gray-50">
+                                <th class="py-2 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data</th>
+                                <th class="py-2 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ora</th>
+                                <th class="py-2 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nominativo</th>
+                                <th class="py-2 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Telefono</th>
+                                <th class="py-2 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data Nascita</th>
+                                <th class="py-2 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Città Residenza</th>
+                                <th class="py-2 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Token</th>
+                            </tr>
+                        </thead>
+                        <tbody id="bookings-table-body" class="bg-white divide-y divide-gray-200">
+                            <tr><td colspan="7" class="text-center py-4 text-gray-500">Nessuna prenotazione attiva.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+        
+    </div>
+
+    <!-- Pannello di Sblocco Amministrativo (Visibile solo se gymId non è in URL) -->
+    <div id="admin-access-block" class="max-w-md mx-auto mt-12 p-8 bg-gray-200 rounded-xl shadow-2xl hidden">
+        <h2 class="text-2xl font-extrabold text-gray-700 mb-4">Accesso Amministrativo</h2>
+        <p class="mb-4 text-gray-600">Inserisci il codice univoco del Centro/Palestra per sbloccare la gestione dei dati (Seeding e Riepilogo).</p>
+        <div class="flex space-x-2">
+            <input type="text" id="admin-gym-id" placeholder="Es. FITNESS_ELITE" class="flex-grow p-3 rounded-lg border border-gray-400 focus:ring-blue-500 focus:border-blue-500 uppercase">
+            <button id="admin-unlock-button" class="py-3 px-6 rounded-lg text-white font-semibold bg-blue-600 hover:bg-blue-700 shadow-md transition duration-150">
+                SBLOCCA
+            </button>
+        </div>
+        <p class="mt-4 text-xs text-gray-500">Questo pannello garantisce che solo tu possa gestire la disponibilità.</p>
+    </div>
+    
+</body>
+</html>
